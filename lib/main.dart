@@ -2,10 +2,13 @@ import 'package:flutter/material.dart';
 import 'package:ftpconnect/ftpconnect.dart';
 import 'package:file_picker/file_picker.dart';
 import 'dart:io';
+import 'dart:async';
 
 void main() {
   runApp(const MyApp());
 }
+
+String remoteDir = '/SD_MMC/upload';
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
@@ -65,13 +68,16 @@ class _MyHomePageState extends State<MyHomePage> {
     );
 
     try {
+      // Set binary mode and active mode
       bool isConnected = await ftpConnect.connect();
-      bool check = await ftpConnect.existFile("a.txt");
-      print(check);
+
       if (isConnected) {
+        ftpConnect.transferMode = TransferMode.active;
+        await ftpConnect.sendCustomCommand('TYPE I');
         setState(() {
-          _connectionStatus = "Connected successfully";
+          _connectionStatus = "Connected successfully (Active mode)";
         });
+        ftpConnect.setTransferType(TransferType.auto);
         print("Connected successfully");
       } else {
         setState(() {
@@ -86,8 +92,11 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
-  Future<void> _uploadFileWithRetry() async {
+  Future<void> _uploadFileInDefaultMode() async {
     if (!_formKey.currentState!.validate()) return;
+
+    ServerSocket? dataSocket;
+    Socket? clientSocket;
 
     try {
       FilePickerResult? result = await FilePicker.platform.pickFiles(
@@ -101,16 +110,20 @@ class _MyHomePageState extends State<MyHomePage> {
         _selectedFileName = result.files.single.name;
         _selectedFilePath = result.files.single.path;
         _isImageFile = true;
-        _connectionStatus = "Uploading ${result.files.single.name}...";
+        _connectionStatus = "Starting upload process...";
       });
 
-      FTPConnect ftpConnect = FTPConnect(
-        _hostController.text,
-        user: _usernameController.text,
-        pass: _passwordController.text,
-        port: int.parse(_portController.text),
-        timeout: 60,
-      );
+      FTPConnect ftpConnect = FTPConnect(_hostController.text,
+          user: _usernameController.text,
+          pass: _passwordController.text,
+          port: int.parse(_portController.text),
+          timeout: 180,
+          securityType: SecurityType.FTP,
+          showLog: true);
+
+      setState(() {
+        _connectionStatus = "Connecting...";
+      });
 
       await ftpConnect.connect();
 
@@ -118,25 +131,55 @@ class _MyHomePageState extends State<MyHomePage> {
         File file = File(_selectedFilePath!);
 
         try {
-          bool res = await ftpConnect.uploadFileWithRetry(
-            file,
-            pRetryCount: 3,
-            onProgress: (double progress, int? transferred, int? total) {
-              setState(() {
-                _connectionStatus = "Uploading: ${progress.round()}%";
-              });
-            },
-          );
+          // Set binary mode first
+          await ftpConnect.sendCustomCommand('TYPE I');
+
+          // Change directory
+          await ftpConnect.changeDirectory('/SD_MMC/upload');
 
           setState(() {
-            _connectionStatus =
-                res ? "File uploaded successfully!" : "Upload failed";
+            _connectionStatus = "Setting up data connection...";
           });
-        } catch (e) {
-          print("Upload operation error: $e");
+
+          // Setup data connection
+          dataSocket = await ServerSocket.bind(InternetAddress.anyIPv4, 0);
+          final address = InternetAddress.anyIPv4.address.split('.');
+          final port = dataSocket.port;
+          final portHi = port ~/ 256;
+          final portLo = port % 256;
+
+          // Send PORT command
+          final portCommand = 'PORT ${address.join(",")},${portHi},${portLo}';
+          await ftpConnect.sendCustomCommand(portCommand);
+
+          // Start upload
           setState(() {
-            _connectionStatus = "Upload failed: $e";
+            _connectionStatus = "Starting file upload...";
           });
+
+          // Send STOR command
+          await ftpConnect
+              .sendCustomCommand('STOR ${result.files.single.name}');
+
+          // Wait for data connection
+          var socketFuture = dataSocket.accept();
+          clientSocket = await socketFuture.timeout(Duration(seconds: 10));
+
+          // Upload file
+          var fileStream = file.openRead();
+          await clientSocket.addStream(fileStream);
+
+          setState(() {
+            _connectionStatus = "Upload completed successfully";
+          });
+        } finally {
+          // Clean up connections
+          if (clientSocket != null) {
+            await clientSocket.close();
+          }
+          if (dataSocket != null) {
+            await dataSocket.close();
+          }
         }
       }
 
@@ -144,8 +187,13 @@ class _MyHomePageState extends State<MyHomePage> {
     } catch (e) {
       print("Upload error: $e");
       setState(() {
-        _connectionStatus = "Upload error: $e";
+        _connectionStatus = "Upload failed: $e";
       });
+      try {
+        if (clientSocket != null) await clientSocket.close();
+        if (dataSocket != null) await dataSocket.close();
+        // await ftpConnect?.disconnect();
+      } catch (_) {}
     }
   }
 
@@ -246,7 +294,7 @@ class _MyHomePageState extends State<MyHomePage> {
               ),
               const SizedBox(height: 16),
               ElevatedButton(
-                onPressed: _uploadFileWithRetry,
+                onPressed: _uploadFileInDefaultMode,
                 style: ElevatedButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 16),
                 ),

@@ -8,7 +8,7 @@
     <application
         android:requestLegacyExternalStorage="true"
         android:usesCleartextTraffic="true"
-        android:label="first_app"
+        android:label="FTP Uploader"
         android:name="${applicationName}"
         android:icon="@mipmap/ic_launcher">
         <activity
