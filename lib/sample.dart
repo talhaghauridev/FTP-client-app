@@ -1,8 +1,9 @@
+import 'dart:async';
+
 import 'package:flutter/material.dart';
 import 'package:ftpconnect/ftpconnect.dart';
 import 'package:file_picker/file_picker.dart';
 import 'dart:io';
-import 'dart:async';
 
 void main() {
   runApp(const MyApp());
@@ -14,6 +15,7 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
+      debugShowCheckedModeBanner: false,
       title: 'FTP Connection Demo',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
@@ -48,9 +50,8 @@ class _MyHomePageState extends State<MyHomePage> {
   String _connectionStatus = "Not Connected";
   String? _selectedFileName;
   String? _selectedFilePath;
-  // ignore: unused_field
   bool _isImageFile = false;
-  TransferMode _transferMode = TransferMode.passive; // Default mode
+
   Future<void> _connectToFtp() async {
     if (!_formKey.currentState!.validate()) return;
 
@@ -90,19 +91,43 @@ class _MyHomePageState extends State<MyHomePage> {
     if (!_formKey.currentState!.validate()) return;
 
     try {
-      FilePickerResult? result = await FilePicker.platform.pickFiles(
-        type: FileType.image,
-        allowMultiple: false,
-      );
+      FilePickerResult? result = await FilePicker.platform
+          .pickFiles(type: FileType.image, allowMultiple: false);
 
       if (result == null) return;
 
       setState(() {
         _selectedFileName = result.files.single.name;
         _selectedFilePath = result.files.single.path;
-        _isImageFile = true;
         _connectionStatus = "Starting upload process...";
       });
+
+      if (_selectedFilePath == null || _selectedFilePath!.isEmpty) {
+        setState(() {
+          _connectionStatus = "No valid file selected.";
+        });
+        return;
+      }
+
+      File file = File(_selectedFilePath!);
+      print('Selected file: ${file.path}'); // Log file path
+
+      if (!await file.exists()) {
+        setState(() {
+          _connectionStatus = "File does not exist.";
+        });
+        return;
+      }
+
+      int fileSize = await file.length();
+      print('File size: $fileSize bytes'); // Log file size
+
+      if (fileSize <= 0) {
+        setState(() {
+          _connectionStatus = "File is empty.";
+        });
+        return;
+      }
 
       FTPConnect ftpConnect = FTPConnect(
         _hostController.text,
@@ -110,74 +135,44 @@ class _MyHomePageState extends State<MyHomePage> {
         pass: _passwordController.text,
         port: int.parse(_portController.text),
         timeout: 180,
-        securityType: SecurityType.FTP,
         showLog: true,
       );
 
       try {
+        if (!await ftpConnect.connect()) {
+          throw Exception("FTP connection failed.");
+        }
+
+        ftpConnect.transferMode = TransferMode.active; // Use active mode
+        await ftpConnect.sendCustomCommand('TYPE I'); // Binary mode
+
+        print('Uploading file: ${file.path}');
+
+        bool uploaded = await ftpConnect.uploadFile(
+          file,
+          sRemoteName: _selectedFileName!,
+          onProgress: (progress, transferred, total) {
+            print(
+                'Progress: $progress%, Transferred: $transferred, Total: $total');
+            setState(() {
+              _connectionStatus = "Uploading: ${progress.round()}%";
+            });
+          },
+        );
+
+        print('Upload ${uploaded ? 'successful' : 'failed'}');
+
         setState(() {
-          _connectionStatus = "Connecting...";
+          _connectionStatus =
+              uploaded ? "File uploaded successfully!" : "Upload failed";
         });
-
-        bool isConnected = await ftpConnect.connect();
-        if (!isConnected) {
-          throw Exception('Not connected');
-        }
-
-        // Set the transfer mode
-        ftpConnect.transferMode = _transferMode;
-
-        if (_selectedFilePath != null) {
-          File file = File(_selectedFilePath!);
-
-          if (!await file.exists()) {
-            setState(() {
-              _connectionStatus = "File does not exist.";
-            });
-            return;
-          }
-
-          int fileSize = await file.length();
-          if (fileSize <= 0) {
-            setState(() {
-              _connectionStatus = "File is empty.";
-            });
-            return;
-          }
-
-          setState(() {
-            _connectionStatus = "Starting file upload...";
-          });
-
-          bool uploaded = await ftpConnect.uploadFileWithRetry(
-            file,
-            pRemoteName: _selectedFileName as String,
-            pRetryCount: 2,
-            onProgress: (double progress, int? transferred, int? total) {
-              setState(() {
-                _connectionStatus = "Uploading: ${progress.round()}%";
-              });
-            },
-          );
-
-          if (uploaded) {
-            setState(() {
-              _connectionStatus = "File uploaded successfully!";
-            });
-          } else {
-            setState(() {
-              _connectionStatus = "Upload failed";
-            });
-          }
-        }
-
-        await ftpConnect.disconnect();
       } catch (e) {
         print("Upload error: $e");
-        await ftpConnect.disconnect();
         setState(() {
-          _connectionStatus = "Upload failed: $e";
+          _connectionStatus = "Upload failed: ${e.toString()}";
         });
+      } finally {
+        await ftpConnect.disconnect();
       }
     } catch (e) {
       print("Process error: $e");
@@ -185,6 +180,15 @@ class _MyHomePageState extends State<MyHomePage> {
         _connectionStatus = "Error: ${e.toString()}";
       });
     }
+  }
+
+  @override
+  void dispose() {
+    _hostController.dispose();
+    _portController.dispose();
+    _usernameController.dispose();
+    _passwordController.dispose();
+    super.dispose();
   }
 
   @override
@@ -265,29 +269,6 @@ class _MyHomePageState extends State<MyHomePage> {
                   return null;
                 },
               ),
-              const SizedBox(height: 16),
-              DropdownButtonFormField<TransferMode>(
-                value: _transferMode,
-                items: [
-                  DropdownMenuItem(
-                    value: TransferMode.active,
-                    child: Text('Active Mode'),
-                  ),
-                  DropdownMenuItem(
-                    value: TransferMode.passive,
-                    child: Text('Passive Mode'),
-                  ),
-                ],
-                onChanged: (value) {
-                  setState(() {
-                    _transferMode = value!;
-                  });
-                },
-                decoration: const InputDecoration(
-                  labelText: 'Select Transfer Mode',
-                  border: OutlineInputBorder(),
-                ),
-              ),
               const SizedBox(height: 24),
               ElevatedButton(
                 onPressed: _connectToFtp,
@@ -297,7 +278,6 @@ class _MyHomePageState extends State<MyHomePage> {
                 child: const Text("Connect to FTP Server"),
               ),
               const SizedBox(height: 16),
-              const SizedBox(height: 24),
               ElevatedButton(
                 onPressed: _uploadFileInDefaultMode,
                 style: ElevatedButton.styleFrom(
@@ -305,6 +285,36 @@ class _MyHomePageState extends State<MyHomePage> {
                 ),
                 child: const Text("Upload File"),
               ),
+              if (_isImageFile && _selectedFilePath != null) ...[
+                const SizedBox(height: 16),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(8.0),
+                    child: Column(
+                      children: [
+                        const Text(
+                          'Selected Image Preview:',
+                          style: TextStyle(
+                            fontSize: 16,
+                            fontWeight: FontWeight.bold,
+                          ),
+                        ),
+                        const SizedBox(height: 8),
+                        Image.file(
+                          File(_selectedFilePath!),
+                          height: 200,
+                          fit: BoxFit.contain,
+                        ),
+                        const SizedBox(height: 8),
+                        Text(
+                          _selectedFileName ?? '',
+                          style: const TextStyle(fontSize: 14),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ],
               const SizedBox(height: 24),
               Card(
                 child: Padding(
