@@ -16,7 +16,7 @@ class MyApp extends StatelessWidget {
   Widget build(BuildContext context) {
     return MaterialApp(
       debugShowCheckedModeBanner: false,
-      title: 'FTP Connection Demo',
+      title: 'FTP Connection',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
             seedColor: const Color.fromARGB(255, 54, 101, 140)),
@@ -50,7 +50,9 @@ class _MyHomePageState extends State<MyHomePage> {
   String _connectionStatus = "Not Connected";
   String? _selectedFileName;
   String? _selectedFilePath;
+  // ignore: prefer_final_fields
   bool _isImageFile = false;
+  FTPConnect? _ftpConnect2;
 
   Future<void> _connectToFtp() async {
     if (!_formKey.currentState!.validate()) return;
@@ -59,28 +61,27 @@ class _MyHomePageState extends State<MyHomePage> {
       _connectionStatus = "Connecting...";
     });
 
-    FTPConnect ftpConnect = FTPConnect(
+    _ftpConnect2 = FTPConnect(
       _hostController.text,
       user: _usernameController.text,
       pass: _passwordController.text,
       port: int.parse(_portController.text),
       timeout: 60,
     );
+
     try {
-      bool isConnected = await ftpConnect.connect();
+      bool isConnected = await _ftpConnect2!.connect();
 
       if (isConnected) {
         setState(() {
-          _connectionStatus = "Connected successfully ";
+          _connectionStatus = "Connected successfully";
         });
-        print("Connected successfully");
       } else {
         setState(() {
           _connectionStatus = "Connection failed";
         });
       }
     } catch (e) {
-      print("Connection error: $e");
       setState(() {
         _connectionStatus = "Error: ${e.toString()}";
       });
