@@ -1,8 +1,11 @@
+import 'dart:io';
+
 import 'package:flutter/material.dart';
+import 'package:flutter/services.dart';
 import 'package:ftpconnect/ftpconnect.dart';
 import 'package:file_picker/file_picker.dart';
-import 'dart:io';
 import 'dart:async';
+import "package:first_app/custom.dart";
 
 void main() {
   runApp(const MyApp());
@@ -37,56 +40,29 @@ class _MyHomePageState extends State<MyHomePage> {
   final _formKey = GlobalKey<FormState>();
 
   final TextEditingController _hostController =
-      TextEditingController(text: 'eu-central-1.sftpcloud.io');
+      TextEditingController(text: 'ftp.dlptest.com');
   final TextEditingController _portController =
       TextEditingController(text: '21');
   final TextEditingController _usernameController =
-      TextEditingController(text: '0e1b8941066c41bdb610f4f4982374b9');
+      TextEditingController(text: 'dlpuser');
   final TextEditingController _passwordController =
-      TextEditingController(text: 'm1FmdH11E1SGYCJ9KoMF1EPGmU6Irrlu');
-
+      TextEditingController(text: 'rNrKYTX9g7z3RgJRmxWuGHbeu');
+  CustomFTPClient? _ftpClient;
   String _connectionStatus = "Not Connected";
   String? _selectedFileName;
   String? _selectedFilePath;
+  List<String> _logs = [];
   // ignore: unused_field
   bool _isImageFile = false;
+
   TransferMode _transferMode = TransferMode.passive; // Default mode
-  Future<void> _connectToFtp() async {
-    if (!_formKey.currentState!.validate()) return;
-
-    setState(() {
-      _connectionStatus = "Connecting...";
-    });
-
-    FTPConnect ftpConnect = FTPConnect(
-      _hostController.text,
-      user: _usernameController.text,
-      pass: _passwordController.text,
-      port: int.parse(_portController.text),
-      timeout: 60,
-    );
-    try {
-      bool isConnected = await ftpConnect.connect();
-      if (isConnected) {
-        setState(() {
-          _connectionStatus = "Connected successfully ";
-        });
-        print("Connected successfully");
-      } else {
-        setState(() {
-          _connectionStatus = "Connection failed";
-        });
-      }
-    } catch (e) {
-      print("Connection error: $e");
+  Future<void> _uploadFile() async {
+    if (_ftpClient == null) {
       setState(() {
-        _connectionStatus = "Error: ${e.toString()}";
+        _connectionStatus = "Not connected";
       });
+      return;
     }
-  }
-
-  Future<void> _uploadFileInDefaultMode() async {
-    if (!_formKey.currentState!.validate()) return;
 
     try {
       FilePickerResult? result = await FilePicker.platform.pickFiles(
@@ -99,123 +75,138 @@ class _MyHomePageState extends State<MyHomePage> {
       setState(() {
         _selectedFileName = result.files.single.name;
         _selectedFilePath = result.files.single.path;
-        _isImageFile = true;
-        _connectionStatus = "Starting upload process...";
+        _connectionStatus = "Starting upload...";
       });
-
-      // Create FTP connection with explicit mode
-      FTPConnect ftpConnect = FTPConnect(
-        _hostController.text,
-        user: _usernameController.text,
-        pass: _passwordController.text,
-        port: int.parse(_portController.text),
-        timeout: 300, // Increased timeout
-        securityType: SecurityType.FTP,
-        showLog: true,
-      );
-
-      setState(() {
-        _connectionStatus = "Connecting...";
-      });
-
-      // Connect first
-      bool isConnected = await ftpConnect.connect();
-      if (!isConnected) {
-        throw Exception('Failed to connect to FTP server.');
-      }
-
-      // Force active mode since we're seeing PASV issues
-      ftpConnect.transferMode = TransferMode.active;
-
-      // Set binary mode
-      await ftpConnect.setTransferType(TransferType.binary);
 
       if (_selectedFilePath != null) {
-        File file = File(_selectedFilePath!);
-
-        if (!await file.exists()) {
-          setState(() {
-            _connectionStatus = "File does not exist.";
-          });
-          return;
-        }
-
-        int fileSize = await file.length();
-        if (fileSize <= 0) {
-          setState(() {
-            _connectionStatus = "File is empty.";
-          });
-          return;
-        }
-
-        print("File size: $fileSize bytes");
-
-        // Change directory first
-        try {
-          await ftpConnect.changeDirectory('/SD_MMC');
-        } catch (e) {
-          print("Directory change failed, attempting to create: $e");
-          try {
-            await ftpConnect.makeDirectory('/SD_MMC');
-            await ftpConnect.changeDirectory('/SD_MMC');
-          } catch (e) {
-            print("Directory creation also failed: $e");
-          }
-        }
+        // Note the change in path - we're uploading directly to root
+        await _ftpClient!.uploadFile(_selectedFilePath!,
+            '/${_selectedFileName ?? 'uploaded_file.jpg'}' // Changed from /SD_MMC/
+            );
 
         setState(() {
-          _connectionStatus = "Starting file upload...";
+          _connectionStatus = "Upload completed successfully";
         });
-
-        // Simplified remote path
-        String remotePath = _selectedFileName ?? 'uploaded_image.jpg';
-
-        try {
-          bool uploaded = await ftpConnect.uploadFile(
-            file,
-            sRemoteName: remotePath,
-            onProgress: (double progress, int? transferred, int? total) {
-              setState(() {
-                if (total != null && total > 0) {
-                  _connectionStatus = "Uploading: ${(progress * 100).round()}%";
-                } else {
-                  _connectionStatus =
-                      "Uploading: $transferred bytes transferred";
-                }
-              });
-            },
-          );
-
-          if (uploaded) {
-            setState(() {
-              _connectionStatus = "File uploaded successfully!";
-            });
-          } else {
-            setState(() {
-              _connectionStatus = "Upload completed but status unclear";
-            });
-          }
-        } catch (e) {
-          print("Specific upload error: $e");
-          setState(() {
-            _connectionStatus = "Upload error: $e";
-          });
-        }
       }
-
-      // Always try to disconnect
-      try {
-        await ftpConnect.disconnect();
-      } catch (e) {
-        print("Disconnect error (non-fatal): $e");
-      }
-    } catch (e, stackTrace) {
-      print("Upload error: $e");
-      print("Stack trace: $stackTrace");
+    } catch (e) {
       setState(() {
-        _connectionStatus = "Upload failed: ${e.toString()}";
+        _connectionStatus = "Upload failed: $e";
       });
     }
+  }
+
+  Future<void> _connectToFtp() async {
+    if (!_formKey.currentState!.validate()) return;
+
+    setState(() {
+      _connectionStatus = "Connecting...";
+    });
+
+    try {
+      // Convert TransferMode to FtpTransferMode
+      FtpTransferMode selectedMode = _transferMode == TransferMode.active
+          ? FtpTransferMode.active
+          : FtpTransferMode.passive;
+
+      _ftpClient = CustomFTPClient(
+        host: _hostController.text,
+        port: int.parse(_portController.text),
+        username: _usernameController.text,
+        password: _passwordController.text,
+        transferMode: selectedMode, // Use the selected mode
+        onLogMessage: (log) {
+          print(log);
+          setState(() {
+            _logs.add(log);
+            if (_logs.length > 100) _logs.removeAt(0);
+          });
+        },
+      );
+
+      // Subscribe to log stream
+      _ftpClient!.logStream.listen((log) {
+        setState(() {
+          _logs.add(log);
+          if (_logs.length > 100) _logs.removeAt(0);
+        });
+      });
+
+      await _ftpClient!.connect();
+
+      setState(() {
+        _connectionStatus =
+            "Connected successfully (${selectedMode == FtpTransferMode.active ? 'Active Mode' : 'Passive Mode'})";
+      });
+    } catch (e) {
+      setState(() {
+        _connectionStatus = "Connection failed: $e";
+      });
+    }
+  }
+
+  Future<void> _uploadLocalAsset() async {
+    if (_ftpClient == null) {
+      setState(() {
+        _connectionStatus = "Not connected";
+      });
+      return;
+    }
+
+    try {
+      setState(() {
+        _connectionStatus = "Starting local asset upload...";
+      });
+
+      // First verify asset exists
+      final assetPath = 'assets/adaptive-icon.png';
+      try {
+        await rootBundle.load(assetPath);
+      } catch (e) {
+        throw Exception(
+            'Asset not found: Make sure $assetPath is added to pubspec.yaml');
+      }
+
+      // Create a temporary file from the asset
+      final ByteData data = await rootBundle.load(assetPath);
+      final List<int> bytes = data.buffer.asUint8List();
+
+      // Use application's temporary directory
+      final tempDir = await Directory.systemTemp.createTemp();
+      final tempPath = '${tempDir.path}/adaptive-icon.png';
+      final File tempFile = File(tempPath);
+
+      try {
+        await tempFile.writeAsBytes(bytes);
+        print('Created temporary file at: $tempPath');
+
+        // Upload the file
+        await _ftpClient!.uploadFile(tempPath, '/adaptive-icon.png');
+
+        setState(() {
+          _connectionStatus = "Icon uploaded successfully";
+        });
+      } finally {
+        // Cleanup
+        try {
+          await tempFile.delete();
+          await tempDir.delete(recursive: true);
+          print('Temporary files cleaned up');
+        } catch (e) {
+          print('Cleanup error: $e');
+        }
+      }
+    } catch (e) {
+      print('Upload error: $e');
+      setState(() {
+        _connectionStatus = "Icon upload failed: $e";
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _ftpClient?.disconnect();
+    super.dispose();
   }
 
   @override
@@ -330,13 +321,22 @@ class _MyHomePageState extends State<MyHomePage> {
               const SizedBox(height: 16),
               const SizedBox(height: 24),
               ElevatedButton(
-                onPressed: _uploadFileInDefaultMode,
+                onPressed: _uploadFile,
                 style: ElevatedButton.styleFrom(
                   padding: const EdgeInsets.symmetric(vertical: 16),
                 ),
                 child: const Text("Upload File"),
               ),
               const SizedBox(height: 24),
+              // Add new button for uploading the icon
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: _uploadLocalAsset,
+                style: ElevatedButton.styleFrom(
+                  padding: const EdgeInsets.symmetric(vertical: 16),
+                ),
+                child: const Text("Upload Icon"),
+              ),
               Card(
                 child: Padding(
                   padding: const EdgeInsets.all(16.0),
