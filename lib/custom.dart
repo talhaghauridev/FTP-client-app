@@ -1,8 +1,34 @@
+// custom.dart
 import 'dart:io';
 import 'dart:async';
 import 'dart:convert';
 
 enum FtpTransferMode { active, passive }
+
+class FtpEntry {
+  final String name;
+  final bool isDirectory;
+  final int size;
+  final String permissions;
+  final String modified;
+  final String owner;
+  final String group;
+
+  FtpEntry({
+    required this.name,
+    required this.isDirectory,
+    required this.size,
+    required this.permissions,
+    required this.modified,
+    required this.owner,
+    required this.group,
+  });
+
+  @override
+  String toString() {
+    return '${isDirectory ? 'd' : '-'}$permissions $owner $group $size $modified $name';
+  }
+}
 
 class CustomFTPClient {
   final String host;
@@ -10,18 +36,16 @@ class CustomFTPClient {
   final String username;
   final String password;
   final FtpTransferMode transferMode;
-  Function(String)? onLogMessage; // Callback for logging
+  Function(String)? onLogMessage;
 
   Socket? _controlSocket;
   Socket? _dataSocket;
   ServerSocket? _passiveServer;
-
-  List<String> _logs = []; // Store logs
-
+  List<String> _logs = [];
   StreamController<String> _logController =
       StreamController<String>.broadcast();
   Stream<String> get logStream => _logController.stream;
-  List<String> get logs => _logs; // Getter for logs
+  List<String> get logs => _logs;
   Completer<Socket>? _activeSocketCompleter;
   StreamSubscription<Socket>? _serverSubscription;
 
@@ -39,18 +63,15 @@ class CustomFTPClient {
     _logs.add(logMessage);
     _logController.add(logMessage);
     onLogMessage?.call(logMessage);
-    print(logMessage); // Print to console
+    print(logMessage);
   }
 
   Future<void> connect() async {
     try {
       _log('Connecting to $host:$port');
-
-      // Connect to control port
       _controlSocket = await Socket.connect(host, port);
       _log('Control connection established');
 
-      // Set up control connection handling
       _controlSocket!.encoding = ascii;
       _controlSocket!.listen(
         _handleControlResponse,
@@ -61,11 +82,9 @@ class CustomFTPClient {
         onDone: () => _log('Control connection closed'),
       );
 
-      // Wait for welcome message
       String welcome = await _waitForResponse('220');
       _log('Server welcome message: $welcome');
 
-      // Login sequence
       _log('Starting login sequence...');
       await _sendCommand('USER $username');
       await _waitForResponse('331');
@@ -75,7 +94,6 @@ class CustomFTPClient {
 
       _log('Login successful');
 
-      // Set transfer mode
       if (transferMode == FtpTransferMode.passive) {
         _log('Setting passive mode');
       } else {
@@ -92,75 +110,43 @@ class CustomFTPClient {
     try {
       _activeSocketCompleter = Completer<Socket>();
 
-      // Get the best network interface
       final interfaces = await NetworkInterface.list();
-      NetworkInterface? bestInterface;
+      var selectedInterface = interfaces.firstWhere(
+          (i) =>
+              i.addresses.any((addr) => addr.address.startsWith('192.168.4')),
+          orElse: () => interfaces.first);
 
-      // Try to find a non-loopback interface
-      for (var interface in interfaces) {
-        var addresses = interface.addresses.where((addr) =>
-            addr.type == InternetAddressType.IPv4 && !addr.isLoopback);
-        if (addresses.isNotEmpty) {
-          bestInterface = interface;
-          break;
-        }
-      }
+      var ipAddress = selectedInterface.addresses.firstWhere(
+          (addr) =>
+              addr.type == InternetAddressType.IPv4 &&
+              addr.address.startsWith('192.168.4'),
+          orElse: () => selectedInterface.addresses.first);
 
-      if (bestInterface == null) {
-        throw Exception('No suitable network interface found');
-      }
+      _log(
+          'Using interface: ${selectedInterface.name}, IP: ${ipAddress.address}');
 
-      // Get the first IPv4 address
-      final ipAddress = bestInterface.addresses
-          .firstWhere((addr) => addr.type == InternetAddressType.IPv4);
-
-      // Create server socket
-      _passiveServer = await ServerSocket.bind(ipAddress, 0);
+      _passiveServer = await ServerSocket.bind(InternetAddress.anyIPv4, 0);
       final port = _passiveServer!.port;
 
-      // Format IP for PORT command
-      final formattedIp = ipAddress.address.split('.').join(',');
-      final p1 = port ~/ 256;
-      final p2 = port % 256;
+      final portCmd =
+          'PORT ${ipAddress.address.split('.').join(',')},${port ~/ 256},${port % 256}';
+      await _sendCommand(portCmd);
+      await _waitForResponse('200');
 
-      final portCommand = 'PORT $formattedIp,$p1,$p2';
-      _log('Setting up active mode with IP: ${ipAddress.address}:$port');
-      _log('Sending PORT command: $portCommand');
-
-      await _sendCommand(portCommand);
-      final response = await _waitForResponse('200',
-          acceptableResponses: ['200', '501', '500']);
-
-      if (!response.startsWith('200')) {
-        throw Exception('Server rejected PORT command: $response');
-      }
-
-      // Set up listener with timeout
-      _serverSubscription?.cancel();
       _serverSubscription = _passiveServer!.listen(
         (Socket socket) {
           _log(
-              'Received data connection from: ${socket.remoteAddress.address}:${socket.remotePort}');
-          if (_activeSocketCompleter != null &&
-              !_activeSocketCompleter!.isCompleted) {
+              'Data connection received from: ${socket.remoteAddress.address}');
+          if (!_activeSocketCompleter!.isCompleted) {
             _activeSocketCompleter!.complete(socket);
           }
         },
-        onError: (error) {
-          _log('Active mode listener error: $error');
-          if (_activeSocketCompleter != null &&
-              !_activeSocketCompleter!.isCompleted) {
-            _activeSocketCompleter!.completeError(error);
-          }
-        },
-        cancelOnError: true,
+        onError: (e) => _log('Server error: $e'),
       );
-
-      _log('Active mode server listening on ${ipAddress.address}:$port');
     } catch (e) {
-      _log('Active mode setup failed: $e');
+      _log('Active mode setup error: $e');
       await _cleanup();
-      throw Exception('Failed to setup active mode: $e');
+      rethrow;
     }
   }
 
@@ -171,84 +157,60 @@ class CustomFTPClient {
 
     try {
       return await _activeSocketCompleter!.future.timeout(
-        Duration(seconds: 10), // Reduced timeout
+        Duration(seconds: 30),
         onTimeout: () {
-          _log('Active mode connection timeout - falling back to passive mode');
+          _log('Active mode connection timeout');
           throw TimeoutException('Active mode connection timeout');
         },
       );
     } catch (e) {
-      // Try to clean up on error
       await _cleanup();
       rethrow;
     }
   }
 
   Future<void> uploadFile(String localPath, String remotePath) async {
-    bool useFallbackMode = false;
-
     try {
       _log('Starting file upload process...');
 
-      // Set binary mode
       await _sendCommand('TYPE I');
       await _waitForResponse('200');
 
-      // First establish data connection BEFORE sending STOR
-      if (transferMode == FtpTransferMode.passive) {
-        _log('Setting up passive mode connection');
+      if (transferMode == FtpTransferMode.active) {
+        await _setupActiveMode();
+        _dataSocket = await _waitForActiveConnection();
+      } else {
         await _sendCommand('PASV');
         String pasvResponse = await _waitForResponse('227');
         var dataPort = _parsePASVResponse(pasvResponse);
-        _log('Connecting to port: $dataPort');
-
-        // Create data connection
         _dataSocket = await Socket.connect(host, dataPort);
-        await Future.delayed(
-            Duration(milliseconds: 100)); // Give connection time to stabilize
-
-        if (_dataSocket == null) {
-          throw Exception('Failed to establish data connection');
-        }
-        _log('Data connection established successfully');
       }
 
-      // Now send STOR command
-      _log('Sending STOR command');
       await _sendCommand('STOR $remotePath');
       await _waitForResponse('150', acceptableResponses: ['125', '150', '200']);
 
-      // Read and upload file
       File file = File(localPath);
       final bytes = await file.readAsBytes();
 
-      // Upload with smaller chunks and progress tracking
-      int chunkSize = 4096; // 4KB chunks
+      int chunkSize = 1024;
       int uploaded = 0;
 
       for (var i = 0; i < bytes.length; i += chunkSize) {
-        if (_dataSocket == null) {
-          throw Exception('Lost data connection during upload');
-        }
-
         var end = (i + chunkSize) < bytes.length ? i + chunkSize : bytes.length;
         var chunk = bytes.sublist(i, end);
-
         _dataSocket!.add(chunk);
         uploaded += chunk.length;
 
-        var progress = ((uploaded / bytes.length) * 100).toStringAsFixed(1);
-        _log('Upload progress: $progress%');
+        if (uploaded % (chunkSize * 10) == 0) {
+          await _dataSocket!.flush();
+          await Future.delayed(Duration(milliseconds: 50));
+        }
       }
 
-      // Ensure all data is written
       await _dataSocket!.flush();
       await _dataSocket!.close();
 
-      // Wait for transfer completion
-      final response = await _waitForResponse('226',
-          acceptableResponses: ['225', '226', '250']);
-      _log('Upload complete: $response');
+      await _waitForResponse('226', acceptableResponses: ['225', '226', '250']);
     } catch (e) {
       _log('Upload error: $e');
       throw Exception('Upload failed: $e');
@@ -257,11 +219,93 @@ class CustomFTPClient {
     }
   }
 
+  Future<List<FtpEntry>> listDirectoryContent([String path = '']) async {
+    List<FtpEntry> entries = [];
+
+    try {
+      await _sendCommand('TYPE A');
+      await _waitForResponse('200');
+
+      if (transferMode == FtpTransferMode.active) {
+        await _setupActiveMode();
+        _dataSocket = await _waitForActiveConnection();
+      } else {
+        await _sendCommand('PASV');
+        String pasvResponse = await _waitForResponse('227');
+        var dataPort = _parsePASVResponse(pasvResponse);
+        _dataSocket = await Socket.connect(host, dataPort);
+      }
+
+      await _sendCommand('LIST $path');
+      await _waitForResponse('150', acceptableResponses: ['125', '150']);
+
+      List<int> responseData = [];
+      await _dataSocket!.listen(
+        (data) {
+          responseData.addAll(data);
+        },
+        onDone: () async {
+          _log('Directory listing complete');
+        },
+      ).asFuture();
+
+      await _dataSocket!.close();
+      await _waitForResponse('226');
+
+      String listing = utf8.decode(responseData);
+      entries = _parseDirectoryListing(listing);
+    } catch (e) {
+      _log('List directory error: $e');
+      throw Exception('Failed to list directory: $e');
+    } finally {
+      await _cleanup();
+    }
+
+    return entries;
+  }
+
+  List<FtpEntry> _parseDirectoryListing(String listing) {
+    List<FtpEntry> entries = [];
+
+    for (String line in listing.split('\n')) {
+      if (line.trim().isEmpty) continue;
+
+      try {
+        RegExp regex = RegExp(
+            r'^([\-ld])([rwxt-]{9})\s+(\d+)\s+(\w+)\s+(\w+)\s+(\d+)\s+(\w+\s+\d+\s+[\d:]+)\s+(.+)$');
+
+        var match = regex.firstMatch(line);
+        if (match != null) {
+          bool isDirectory = match.group(1) == 'd';
+          String permissions = match.group(2) ?? '';
+          String owner = match.group(4) ?? '';
+          String group = match.group(5) ?? '';
+          int size = int.tryParse(match.group(6) ?? '0') ?? 0;
+          String modified = match.group(7) ?? '';
+          String name = match.group(8) ?? '';
+
+          entries.add(FtpEntry(
+            name: name,
+            isDirectory: isDirectory,
+            size: size,
+            permissions: permissions,
+            modified: modified,
+            owner: owner,
+            group: group,
+          ));
+        }
+      } catch (e) {
+        _log('Error parsing line: $line');
+      }
+    }
+
+    return entries;
+  }
+
   Future<void> _cleanup() async {
     try {
       _log('Starting cleanup');
 
-      // Clean up data socket
       if (_dataSocket != null) {
         try {
           await _dataSocket!.flush();
@@ -272,7 +316,6 @@ class CustomFTPClient {
         _dataSocket = null;
       }
 
-      // Clean up active mode resources
       if (transferMode == FtpTransferMode.active) {
         _serverSubscription?.cancel();
         _serverSubscription = null;
@@ -283,7 +326,6 @@ class CustomFTPClient {
           _log('Error closing server socket: $e');
         }
         _passiveServer = null;
-
         _activeSocketCompleter = null;
       }
 
@@ -321,7 +363,6 @@ class CustomFTPClient {
       throw Exception('Not connected');
     }
 
-    // Mask password in logs
     final logCommand = command.startsWith('PASS ') ? 'PASS ****' : command;
     _log('Sending command: $logCommand');
 
@@ -367,15 +408,14 @@ class CustomFTPClient {
 
   int _parsePASVResponse(String response) {
     _log('Parsing PASV response: $response');
+
     RegExp regex = RegExp(r'\((\d+,\d+,\d+,\d+,\d+,\d+)\)');
     Match? match = regex.firstMatch(response);
 
     if (match == null) {
-      // Attempt alternative parsing without parentheses
       regex = RegExp(r'(\d+),(\d+),(\d+),(\d+),(\d+),(\d+)');
       match = regex.firstMatch(response);
       if (match == null || match.groupCount != 6) {
-        _log('Invalid PASV response format');
         throw Exception('Invalid PASV response: $response');
       }
     }
@@ -389,7 +429,6 @@ class CustomFTPClient {
       _log('Calculated data port: $port');
       return port;
     } catch (e) {
-      _log('Error parsing PASV response: $e');
       throw Exception('Error parsing PASV response: $e');
     }
   }

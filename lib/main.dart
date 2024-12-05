@@ -1,12 +1,11 @@
+import 'dart:async';
 import 'package:flutter/material.dart';
 import 'package:ftpconnect/ftpconnect.dart';
 import 'package:file_picker/file_picker.dart';
+import 'package:image_cropper/image_cropper.dart';
 import 'dart:io';
-import 'dart:async';
 
-void main() {
-  runApp(const MyApp());
-}
+void main() => runApp(const MyApp());
 
 class MyApp extends StatelessWidget {
   const MyApp({super.key});
@@ -14,13 +13,14 @@ class MyApp extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     return MaterialApp(
-      title: 'FTP Connection Demo',
+      debugShowCheckedModeBanner: false,
+      title: 'FTP Connection',
       theme: ThemeData(
         colorScheme: ColorScheme.fromSeed(
             seedColor: const Color.fromARGB(255, 54, 101, 140)),
         useMaterial3: true,
       ),
-      home: const MyHomePage(title: 'FTP Connection Demo'),
+      home: const MyHomePage(title: 'FTP File Uploader'),
     );
   }
 }
@@ -35,22 +35,26 @@ class MyHomePage extends StatefulWidget {
 
 class _MyHomePageState extends State<MyHomePage> {
   final _formKey = GlobalKey<FormState>();
+  bool _isImageUploading = false;
 
   final TextEditingController _hostController =
-      TextEditingController(text: 'eu-central-1.sftpcloud.io');
+      TextEditingController(text: '192.168.4.1');
   final TextEditingController _portController =
       TextEditingController(text: '21');
   final TextEditingController _usernameController =
-      TextEditingController(text: '0e1b8941066c41bdb610f4f4982374b9');
+      TextEditingController(text: '');
   final TextEditingController _passwordController =
-      TextEditingController(text: 'm1FmdH11E1SGYCJ9KoMF1EPGmU6Irrlu');
+      TextEditingController(text: '');
 
   String _connectionStatus = "Not Connected";
   String? _selectedFileName;
   String? _selectedFilePath;
-  // ignore: unused_field
-  bool _isImageFile = false;
-  TransferMode _transferMode = TransferMode.passive; // Default mode
+  String? _croppedFilePath;
+  TransferMode _transferMode = TransferMode.passive;
+  FTPConnect? _ftpConnect2;
+  bool _isConnected = false;
+
+  dynamic disconnectStyles = false;
   Future<void> _connectToFtp() async {
     if (!_formKey.currentState!.validate()) return;
 
@@ -58,164 +62,167 @@ class _MyHomePageState extends State<MyHomePage> {
       _connectionStatus = "Connecting...";
     });
 
-    FTPConnect ftpConnect = FTPConnect(
+    _ftpConnect2 = FTPConnect(
       _hostController.text,
       user: _usernameController.text,
       pass: _passwordController.text,
       port: int.parse(_portController.text),
       timeout: 60,
     );
+
     try {
-      bool isConnected = await ftpConnect.connect();
+      bool isConnected = await _ftpConnect2!.connect();
       if (isConnected) {
+        _ftpConnect2?.transferMode = _transferMode;
+        await _ftpConnect2?.sendCustomCommand('TYPE I');
         setState(() {
-          _connectionStatus = "Connected successfully ";
+          _isConnected = true;
+          _connectionStatus = "Connected successfully";
         });
-        print("Connected successfully");
       } else {
         setState(() {
+          _isConnected = false;
           _connectionStatus = "Connection failed";
         });
       }
     } catch (e) {
-      print("Connection error: $e");
+      print(e);
+    }
+  }
+
+  Future<void> _cropImage() async {
+    if (_selectedFilePath == null) return;
+
+    final croppedFile = await ImageCropper().cropImage(
+      sourcePath: _selectedFilePath!,
+      aspectRatio: const CropAspectRatio(ratioX: 1.5, ratioY: 1),
+      compressQuality: 100,
+      maxWidth: 480,
+      maxHeight: 320,
+      compressFormat: ImageCompressFormat.jpg,
+      uiSettings: [
+        AndroidUiSettings(
+          toolbarTitle: 'Crop Image',
+          toolbarColor: Colors.blue,
+          toolbarWidgetColor: Colors.white,
+          initAspectRatio: CropAspectRatioPreset.ratio3x2,
+          lockAspectRatio: true,
+          hideBottomControls: true,
+          showCropGrid: true,
+        ),
+        IOSUiSettings(
+          title: 'Crop Image',
+          aspectRatioLockEnabled: true,
+          resetAspectRatioEnabled: false,
+          aspectRatioPickerButtonHidden: true,
+          rectWidth: 480,
+          rectHeight: 320,
+          doneButtonTitle: 'Upload',
+        ),
+      ],
+    );
+
+    if (croppedFile != null) {
+      _croppedFilePath = croppedFile.path;
+      await _uploadFile();
+    }
+  }
+
+  Future<void> _pickImage() async {
+    try {
+      FilePickerResult? result = await FilePicker.platform
+          .pickFiles(type: FileType.image, allowMultiple: false);
+
+      if (result != null) {
+        _selectedFileName = result.files.single.name;
+        _selectedFilePath = result.files.single.path;
+        await _cropImage();
+      }
+    } finally {
       setState(() {
-        _connectionStatus = "Error: ${e.toString()}";
+        _isImageUploading = false;
       });
     }
   }
 
-  Future<void> _uploadFileInDefaultMode() async {
-    if (!_formKey.currentState!.validate()) return;
+  Future<void> _uploadFile() async {
+    if (!_formKey.currentState!.validate() ||
+        _ftpConnect2 == null ||
+        _croppedFilePath == null) return;
+
+    setState(() {
+      _connectionStatus = "Starting upload process...";
+    });
 
     try {
-      FilePickerResult? result = await FilePicker.platform.pickFiles(
-        type: FileType.image,
-        allowMultiple: false,
-      );
-
-      if (result == null) return;
-
-      setState(() {
-        _selectedFileName = result.files.single.name;
-        _selectedFilePath = result.files.single.path;
-        _isImageFile = true;
-        _connectionStatus = "Starting upload process...";
-      });
-
-      // Create FTP connection with explicit mode
-      FTPConnect ftpConnect = FTPConnect(
-        _hostController.text,
-        user: _usernameController.text,
-        pass: _passwordController.text,
-        port: int.parse(_portController.text),
-        timeout: 300, // Increased timeout
-        securityType: SecurityType.FTP,
-        showLog: true,
-      );
-
-      setState(() {
-        _connectionStatus = "Connecting...";
-      });
-
-      // Connect first
-      bool isConnected = await ftpConnect.connect();
-      if (!isConnected) {
-        throw Exception('Failed to connect to FTP server.');
-      }
-
-      // Force active mode since we're seeing PASV issues
-      ftpConnect.transferMode = TransferMode.active;
-
-      // Set binary mode
-      await ftpConnect.setTransferType(TransferType.binary);
-
-      if (_selectedFilePath != null) {
-        File file = File(_selectedFilePath!);
-
-        if (!await file.exists()) {
-          setState(() {
-            _connectionStatus = "File does not exist.";
-          });
-          return;
-        }
-
-        int fileSize = await file.length();
-        if (fileSize <= 0) {
-          setState(() {
-            _connectionStatus = "File is empty.";
-          });
-          return;
-        }
-
-        print("File size: $fileSize bytes");
-
-        // Change directory first
-        try {
-          await ftpConnect.changeDirectory('/SD_MMC');
-        } catch (e) {
-          print("Directory change failed, attempting to create: $e");
-          try {
-            await ftpConnect.makeDirectory('/SD_MMC');
-            await ftpConnect.changeDirectory('/SD_MMC');
-          } catch (e) {
-            print("Directory creation also failed: $e");
-          }
-        }
-
+      File file = File(_croppedFilePath!);
+      if (!await file.exists()) {
         setState(() {
-          _connectionStatus = "Starting file upload...";
+          _connectionStatus = "File does not exist.";
         });
+        return;
+      }
 
-        // Simplified remote path
-        String remotePath = _selectedFileName ?? 'uploaded_image.jpg';
-
-        try {
-          bool uploaded = await ftpConnect.uploadFile(
-            file,
-            sRemoteName: remotePath,
-            onProgress: (double progress, int? transferred, int? total) {
-              setState(() {
-                if (total != null && total > 0) {
-                  _connectionStatus = "Uploading: ${(progress * 100).round()}%";
-                } else {
-                  _connectionStatus =
-                      "Uploading: $transferred bytes transferred";
-                }
-              });
-            },
-          );
-
-          if (uploaded) {
-            setState(() {
-              _connectionStatus = "File uploaded successfully!";
-            });
-          } else {
-            setState(() {
-              _connectionStatus = "Upload completed but status unclear";
-            });
-          }
-        } catch (e) {
-          print("Specific upload error: $e");
+      dynamic uploaded = await _ftpConnect2?.uploadFile(
+        file,
+        sRemoteName: _selectedFileName!,
+        onProgress: (progress, transferred, total) {
           setState(() {
-            _connectionStatus = "Upload error: $e";
+            _connectionStatus = "Uploading: ${progress.round()}%";
           });
-        }
-      }
+        },
+      );
 
-      // Always try to disconnect
-      try {
-        await ftpConnect.disconnect();
-      } catch (e) {
-        print("Disconnect error (non-fatal): $e");
-      }
-    } catch (e, stackTrace) {
-      print("Upload error: $e");
-      print("Stack trace: $stackTrace");
+      setState(() {
+        _connectionStatus =
+            uploaded ? "File uploaded successfully!" : "Upload failed";
+      });
+    } catch (e) {
       setState(() {
         _connectionStatus = "Upload failed: ${e.toString()}";
       });
     }
+  }
+
+  // ignore: unused_element
+  Future<void> _listFiles() async {
+    try {
+      final listing = await _ftpConnect2!.listDirectoryContent();
+      String status = 'Found ${listing.length} files';
+      print(listing);
+      setState(() {
+        _connectionStatus = status;
+      });
+    } catch (e) {
+      setState(() {
+        _connectionStatus = "List error: $e";
+      });
+    }
+  }
+
+  Future<void> disconnect() async {
+    try {
+      if (_ftpConnect2 != null) {
+        await _ftpConnect2?.disconnect();
+        setState(() {
+          _connectionStatus = "Disconnected Successfully";
+          _isConnected = false;
+        });
+      }
+    } catch (e) {
+      setState(() {
+        _connectionStatus = "Error $e";
+      });
+    }
+  }
+
+  @override
+  void dispose() {
+    _hostController.dispose();
+    _portController.dispose();
+    _usernameController.dispose();
+    _passwordController.dispose();
+    super.dispose();
   }
 
   @override
@@ -236,15 +243,11 @@ class _MyHomePageState extends State<MyHomePage> {
                 controller: _hostController,
                 decoration: const InputDecoration(
                   labelText: 'Host',
-                  hintText: 'Enter FTP host (e.g., 192.168.4.1)',
+                  hintText: 'Enter FTP host',
                   border: OutlineInputBorder(),
                 ),
-                validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return 'Please enter host';
-                  }
-                  return null;
-                },
+                validator: (value) =>
+                    value?.isEmpty ?? true ? 'Please enter host' : null,
               ),
               const SizedBox(height: 16),
               TextFormField(
@@ -256,10 +259,8 @@ class _MyHomePageState extends State<MyHomePage> {
                   border: OutlineInputBorder(),
                 ),
                 validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return 'Please enter port';
-                  }
-                  if (int.tryParse(value) == null) {
+                  if (value?.isEmpty ?? true) return 'Please enter port';
+                  if (int.tryParse(value!) == null) {
                     return 'Please enter a valid port number';
                   }
                   return null;
@@ -273,12 +274,8 @@ class _MyHomePageState extends State<MyHomePage> {
                   hintText: 'Enter FTP username',
                   border: OutlineInputBorder(),
                 ),
-                validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return 'Please enter username';
-                  }
-                  return null;
-                },
+                validator: (value) =>
+                    value?.isEmpty ?? true ? 'Please enter username' : null,
               ),
               const SizedBox(height: 16),
               TextFormField(
@@ -289,17 +286,13 @@ class _MyHomePageState extends State<MyHomePage> {
                   hintText: 'Enter FTP password',
                   border: OutlineInputBorder(),
                 ),
-                validator: (value) {
-                  if (value == null || value.isEmpty) {
-                    return 'Please enter password';
-                  }
-                  return null;
-                },
+                validator: (value) =>
+                    value?.isEmpty ?? true ? 'Please enter password' : null,
               ),
               const SizedBox(height: 16),
               DropdownButtonFormField<TransferMode>(
                 value: _transferMode,
-                items: [
+                items: const [
                   DropdownMenuItem(
                     value: TransferMode.active,
                     child: Text('Active Mode'),
@@ -323,18 +316,78 @@ class _MyHomePageState extends State<MyHomePage> {
               ElevatedButton(
                 onPressed: _connectToFtp,
                 style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
+                  padding: const EdgeInsets.symmetric(vertical: 12),
+                  backgroundColor:
+                      _isConnected ? Colors.green.shade600 : Colors.white,
                 ),
-                child: const Text("Connect to FTP Server"),
+                child: Text(
+                  _isConnected ? "Connected" : "Connect to Server",
+                  style: TextStyle(
+                      fontSize: 17,
+                      color: _isConnected ? Colors.white : Colors.black),
+                ),
               ),
               const SizedBox(height: 16),
-              const SizedBox(height: 24),
               ElevatedButton(
-                onPressed: _uploadFileInDefaultMode,
+                onPressed: _isImageUploading
+                    ? null
+                    : () async {
+                        setState(() {
+                          _isImageUploading = true;
+                        });
+                        await _pickImage();
+                      },
                 style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 16),
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    backgroundColor: Colors.white),
+                child: _isImageUploading
+                    ? Row(
+                        mainAxisAlignment: MainAxisAlignment.center,
+                        children: const [
+                          SizedBox(
+                            width: 20,
+                            height: 20,
+                            child: CircularProgressIndicator(
+                              strokeWidth: 2,
+                              valueColor:
+                                  AlwaysStoppedAnimation<Color>(Colors.white),
+                            ),
+                          ),
+                          SizedBox(width: 10),
+                          Text("Processing...",
+                              style:
+                                  TextStyle(fontSize: 17, color: Colors.black)),
+                        ],
+                      )
+                    : const Text("Select File",
+                        style: TextStyle(fontSize: 17, color: Colors.black)),
+              ),
+              const SizedBox(height: 16),
+              ElevatedButton(
+                onPressed: () async {
+                  setState(() {
+                    _connectionStatus = "Disconnecting...";
+                    disconnectStyles = true;
+                  });
+                  await Future.delayed(const Duration(milliseconds: 1000));
+                  await disconnect();
+                  setState(() {
+                    _connectionStatus = "Disconnected Successfully";
+
+                    disconnectStyles = false;
+                  });
+                },
+                style: ElevatedButton.styleFrom(
+                    padding: const EdgeInsets.symmetric(vertical: 12),
+                    backgroundColor:
+                        disconnectStyles ? Colors.red.shade800 : Colors.white),
+                child: Text(
+                  disconnectStyles ? "Disconnecting..." : "Disconnect",
+                  style: TextStyle(
+                    color: disconnectStyles ? Colors.white : Colors.black,
+                    fontSize: 17,
+                  ),
                 ),
-                child: const Text("Upload File"),
               ),
               const SizedBox(height: 24),
               Card(
