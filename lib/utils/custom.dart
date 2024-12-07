@@ -41,8 +41,8 @@ class CustomFTPClient {
   Socket? _controlSocket;
   Socket? _dataSocket;
   ServerSocket? _passiveServer;
-  List<String> _logs = [];
-  StreamController<String> _logController =
+  final List<String> _logs = [];
+  final StreamController<String> _logController =
       StreamController<String>.broadcast();
   Stream<String> get logStream => _logController.stream;
   List<String> get logs => _logs;
@@ -423,7 +423,7 @@ class CustomFTPClient {
     try {
       List<int> numbers = [];
       for (int i = 1; i <= 6; i++) {
-        numbers.add(int.parse(match!.group(i)!));
+        numbers.add(int.parse(match.group(i)!));
       }
       final port = numbers[4] * 256 + numbers[5];
       _log('Calculated data port: $port');

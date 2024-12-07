@@ -1,9 +1,11 @@
-import 'dart:async';
+import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:ftpconnect/ftpconnect.dart';
 import 'package:file_picker/file_picker.dart';
 import 'package:image_cropper/image_cropper.dart';
+import 'package:permission_handler/permission_handler.dart';
 import 'dart:io';
+import 'dart:async';
 
 void main() => runApp(const MyApp());
 
@@ -128,8 +130,38 @@ class _MyHomePageState extends State<MyHomePage> {
     }
   }
 
+  Future<bool> _requestPermissions() async {
+    if (Platform.isAndroid) {
+      final androidInfo = await DeviceInfoPlugin().androidInfo;
+
+      if (androidInfo.version.sdkInt >= 33) {
+        // Android 13 and above
+        final status = await Permission.photos.request();
+        return status.isGranted;
+      } else if (androidInfo.version.sdkInt >= 30) {
+        // Android 11 and 12
+        final status = await Permission.storage.request();
+        return status.isGranted;
+      } else {
+        // Android 10 and below
+        final status = await Permission.storage.request();
+        return status.isGranted;
+      }
+    }
+    return true;
+  }
+
   Future<void> _pickImage() async {
     try {
+      bool hasPermission = await _requestPermissions();
+      if (!hasPermission) {
+        setState(() {
+          _connectionStatus = "Storage permission required";
+          _isImageUploading = false;
+        });
+        return;
+      }
+
       FilePickerResult? result = await FilePicker.platform
           .pickFiles(type: FileType.image, allowMultiple: false);
 
@@ -138,6 +170,11 @@ class _MyHomePageState extends State<MyHomePage> {
         _selectedFilePath = result.files.single.path;
         await _cropImage();
       }
+    } catch (e) {
+      setState(() {
+        _connectionStatus = "Error picking image: $e";
+        _isImageUploading = false;
+      });
     } finally {
       setState(() {
         _isImageUploading = false;
