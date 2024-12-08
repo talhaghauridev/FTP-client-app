@@ -2,10 +2,12 @@ import 'package:device_info_plus/device_info_plus.dart';
 import 'package:flutter/material.dart';
 import 'package:ftpconnect/ftpconnect.dart';
 import 'package:file_picker/file_picker.dart';
-import 'package:image_cropper/image_cropper.dart';
 import 'package:permission_handler/permission_handler.dart';
+import 'package:crop_your_image/crop_your_image.dart';
+import 'package:path_provider/path_provider.dart';
 import 'dart:io';
 import 'dart:async';
+import 'dart:typed_data';
 
 void main() => runApp(const MyApp());
 
@@ -37,7 +39,10 @@ class MyHomePage extends StatefulWidget {
 
 class _MyHomePageState extends State<MyHomePage> {
   final _formKey = GlobalKey<FormState>();
+  final _cropController = CropController();
   bool _isImageUploading = false;
+  bool _isCropping = false;
+  Uint8List? _imageData;
 
   final TextEditingController _hostController =
       TextEditingController(text: '192.168.4.1');
@@ -57,6 +62,7 @@ class _MyHomePageState extends State<MyHomePage> {
   bool _isConnected = false;
 
   dynamic disconnectStyles = false;
+
   Future<void> _connectToFtp() async {
     if (!_formKey.currentState!.validate()) return;
 
@@ -89,45 +95,89 @@ class _MyHomePageState extends State<MyHomePage> {
       }
     } catch (e) {
       print(e);
+      setState(() {
+        _connectionStatus = "Connection error: $e";
+        _isImageUploading = false;
+      });
     }
   }
 
-  Future<void> _cropImage() async {
-    if (_selectedFilePath == null) return;
-
-    final croppedFile = await ImageCropper().cropImage(
-      sourcePath: _selectedFilePath!,
-      aspectRatio: const CropAspectRatio(ratioX: 1.5, ratioY: 1),
-      compressQuality: 100,
-      maxWidth: 480,
-      maxHeight: 320,
-      compressFormat: ImageCompressFormat.jpg,
-      uiSettings: [
-        AndroidUiSettings(
-          toolbarTitle: 'Crop Image',
-          toolbarColor: Colors.blue,
-          toolbarWidgetColor: Colors.white,
-          initAspectRatio: CropAspectRatioPreset.ratio3x2,
-          lockAspectRatio: true,
-          hideBottomControls: true,
-          showCropGrid: true,
+  Future<void> _showCropDialog(BuildContext context) async {
+    await Navigator.push(
+      context,
+      MaterialPageRoute(
+        builder: (context) => Scaffold(
+          appBar: AppBar(
+            backgroundColor: Theme.of(context).colorScheme.inversePrimary,
+            leading: IconButton(
+              icon: Icon(Icons.close, color: Colors.white),
+              onPressed: () {
+                setState(() {
+                  _isImageUploading = false;
+                });
+                Navigator.pop(context);
+              },
+            ),
+            actions: [
+              IconButton(
+                icon: Icon(Icons.check, color: Colors.white),
+                onPressed: _isCropping
+                    ? null
+                    : () async {
+                        Navigator.pop(context); // Close immediately
+                        _cropController.crop(); // Start cropping after closing
+                        await _uploadFile();
+                      },
+              ),
+            ],
+            title: Text(
+              'Cropper',
+              style: TextStyle(color: Colors.white),
+            ),
+          ),
+          backgroundColor: Colors.black,
+          body: Column(
+            children: [
+              Expanded(
+                child: Crop(
+                  controller: _cropController,
+                  image: _imageData!,
+                  aspectRatio: 480 / 320,
+                  onCropped: (croppedData) async {
+                    setState(() => _isCropping = true);
+                    try {
+                      final tempDir = await getTemporaryDirectory();
+                      final file = File(
+                          '${tempDir.path}/cropped_${DateTime.now().millisecondsSinceEpoch}.jpg');
+                      await file.writeAsBytes(croppedData);
+                      _croppedFilePath = file.path;
+                    } catch (e) {
+                      print("Cropping error: $e");
+                      setState(() {
+                        _connectionStatus = "Error processing image: $e";
+                      });
+                    } finally {
+                      setState(() {
+                        _isCropping = false;
+                      });
+                    }
+                  },
+                  initialSize: 1,
+                  maskColor: Colors.black.withOpacity(0.7),
+                  baseColor: Colors.black,
+                  progressIndicator: Text(
+                    "Loading...",
+                    style: TextStyle(color: Colors.white),
+                  ),
+                  cornerDotBuilder: (size, edgeAlignment) =>
+                      const SizedBox.shrink(),
+                ),
+              ),
+            ],
+          ),
         ),
-        IOSUiSettings(
-          title: 'Crop Image',
-          aspectRatioLockEnabled: true,
-          resetAspectRatioEnabled: false,
-          aspectRatioPickerButtonHidden: true,
-          rectWidth: 480,
-          rectHeight: 320,
-          doneButtonTitle: 'Upload',
-        ),
-      ],
+      ),
     );
-
-    if (croppedFile != null) {
-      _croppedFilePath = croppedFile.path;
-      await _uploadFile();
-    }
   }
 
   Future<bool> _requestPermissions() async {
@@ -135,17 +185,14 @@ class _MyHomePageState extends State<MyHomePage> {
       final androidInfo = await DeviceInfoPlugin().androidInfo;
 
       if (androidInfo.version.sdkInt >= 33) {
-        // Android 13 and above
-        final status = await Permission.photos.request();
-        return status.isGranted;
+        final photos = await Permission.photos.request();
+        return photos.isGranted;
       } else if (androidInfo.version.sdkInt >= 30) {
-        // Android 11 and 12
-        final status = await Permission.storage.request();
-        return status.isGranted;
+        final storage = await Permission.storage.request();
+        return storage.isGranted;
       } else {
-        // Android 10 and below
-        final status = await Permission.storage.request();
-        return status.isGranted;
+        final storage = await Permission.storage.request();
+        return storage.isGranted;
       }
     }
     return true;
@@ -168,15 +215,22 @@ class _MyHomePageState extends State<MyHomePage> {
       if (result != null) {
         _selectedFileName = result.files.single.name;
         _selectedFilePath = result.files.single.path;
-        await _cropImage();
+
+        // Read image data
+        final file = File(result.files.single.path!);
+        _imageData = await file.readAsBytes();
+
+        // Show crop dialog
+        await _showCropDialog(context);
+      }
+      if (result == null) {
+        setState(() {
+          _isImageUploading = false;
+        });
       }
     } catch (e) {
       setState(() {
         _connectionStatus = "Error picking image: $e";
-        _isImageUploading = false;
-      });
-    } finally {
-      setState(() {
         _isImageUploading = false;
       });
     }
@@ -200,6 +254,13 @@ class _MyHomePageState extends State<MyHomePage> {
         return;
       }
 
+      // Set binary mode explicitly before upload
+      await _ftpConnect2?.sendCustomCommand('TYPE I');
+
+      print("File size: ${await file.length()}");
+      print("File name: $_selectedFileName");
+      print("File path: ${file.path}");
+
       dynamic uploaded = await _ftpConnect2?.uploadFile(
         file,
         sRemoteName: _selectedFileName!,
@@ -211,28 +272,14 @@ class _MyHomePageState extends State<MyHomePage> {
       );
 
       setState(() {
+        _isImageUploading = false;
         _connectionStatus =
             uploaded ? "File uploaded successfully!" : "Upload failed";
       });
     } catch (e) {
       setState(() {
         _connectionStatus = "Upload failed: ${e.toString()}";
-      });
-    }
-  }
-
-  // ignore: unused_element
-  Future<void> _listFiles() async {
-    try {
-      final listing = await _ftpConnect2!.listDirectoryContent();
-      String status = 'Found ${listing.length} files';
-      print(listing);
-      setState(() {
-        _connectionStatus = status;
-      });
-    } catch (e) {
-      setState(() {
-        _connectionStatus = "List error: $e";
+        _isImageUploading = false;
       });
     }
   }
@@ -405,12 +452,13 @@ class _MyHomePageState extends State<MyHomePage> {
                   setState(() {
                     _connectionStatus = "Disconnecting...";
                     disconnectStyles = true;
+                    _isConnected = false;
                   });
                   await Future.delayed(const Duration(milliseconds: 1000));
                   await disconnect();
                   setState(() {
                     _connectionStatus = "Disconnected Successfully";
-
+                    _isImageUploading = false;
                     disconnectStyles = false;
                   });
                 },
