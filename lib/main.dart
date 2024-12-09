@@ -5,6 +5,7 @@ import 'package:file_picker/file_picker.dart';
 import 'package:permission_handler/permission_handler.dart';
 import 'package:crop_your_image/crop_your_image.dart';
 import 'package:path_provider/path_provider.dart';
+import 'package:image/image.dart' as img;
 import 'dart:io';
 import 'dart:async';
 import 'dart:typed_data';
@@ -43,7 +44,7 @@ class _MyHomePageState extends State<MyHomePage> {
   bool _isImageUploading = false;
   bool _isCropping = false;
   Uint8List? _imageData;
-
+  final FocusNode _focusNode = FocusNode();
   final TextEditingController _hostController =
       TextEditingController(text: '192.168.4.1');
   final TextEditingController _portController =
@@ -55,27 +56,31 @@ class _MyHomePageState extends State<MyHomePage> {
 
   String _connectionStatus = "Not Connected";
   String? _selectedFileName;
-  String? _selectedFilePath;
   String? _croppedFilePath;
   TransferMode _transferMode = TransferMode.passive;
   FTPConnect? _ftpConnect2;
   bool _isConnected = false;
 
   dynamic disconnectStyles = false;
+  void _clearFocus() {
+    FocusManager.instance.primaryFocus?.unfocus();
+  }
 
   Future<void> _connectToFtp() async {
     if (!_formKey.currentState!.validate()) return;
-
+    if (_ftpConnect2 != null) return;
     setState(() {
       _connectionStatus = "Connecting...";
     });
 
     _ftpConnect2 = FTPConnect(
       _hostController.text,
-      user: _usernameController.text,
-      pass: _passwordController.text,
+      user: _usernameController.text.trimRight(),
+      pass: _passwordController.text.trimRight(),
       port: int.parse(_portController.text),
       timeout: 60,
+      showLog: true,
+      logger: Logger(),
     );
 
     try {
@@ -85,6 +90,7 @@ class _MyHomePageState extends State<MyHomePage> {
         await _ftpConnect2?.sendCustomCommand('TYPE I');
         setState(() {
           _isConnected = true;
+          disconnectStyles = false;
           _connectionStatus = "Connected successfully";
         });
       } else {
@@ -94,10 +100,11 @@ class _MyHomePageState extends State<MyHomePage> {
         });
       }
     } catch (e) {
-      print(e);
+      print("Connect $e");
       setState(() {
-        _connectionStatus = "Connection error: $e";
+        _connectionStatus = "Connection error:`$e`";
         _isImageUploading = false;
+        _isConnected = false;
       });
     }
   }
@@ -112,10 +119,13 @@ class _MyHomePageState extends State<MyHomePage> {
             leading: IconButton(
               icon: Icon(Icons.close, color: Colors.white),
               onPressed: () {
+                _clearFocus();
+                Navigator.pop(context);
                 setState(() {
                   _isImageUploading = false;
+                  _connectionStatus =
+                      _isConnected ? "Connected successfully" : "Disconnected";
                 });
-                Navigator.pop(context);
               },
             ),
             actions: [
@@ -123,17 +133,17 @@ class _MyHomePageState extends State<MyHomePage> {
                 icon: Icon(Icons.check, color: Colors.white),
                 onPressed: _isCropping
                     ? null
-                    : () async {
-                        Navigator.pop(context); // Close immediately
-                        _cropController.crop(); // Start cropping after closing
-                        await _uploadFile();
+                    : () {
+                        _clearFocus();
+                        setState(() {
+                          _connectionStatus = "Starting upload process...";
+                        });
+                        _cropController.crop();
+                        Navigator.pop(context);
                       },
               ),
             ],
-            title: Text(
-              'Cropper',
-              style: TextStyle(color: Colors.white),
-            ),
+            title: Text('Cropper', style: TextStyle(color: Colors.white)),
           ),
           backgroundColor: Colors.black,
           body: Column(
@@ -144,31 +154,43 @@ class _MyHomePageState extends State<MyHomePage> {
                   image: _imageData!,
                   aspectRatio: 480 / 320,
                   onCropped: (croppedData) async {
-                    setState(() => _isCropping = true);
+                    setState(() {
+                      _isCropping = true;
+                    });
                     try {
-                      final tempDir = await getTemporaryDirectory();
-                      final file = File(
-                          '${tempDir.path}/cropped_${DateTime.now().millisecondsSinceEpoch}.jpg');
-                      await file.writeAsBytes(croppedData);
-                      _croppedFilePath = file.path;
+                      final img.Image? originalImage =
+                          img.decodeImage(croppedData);
+                      if (originalImage != null) {
+                        final img.Image resizedImage = img.copyResize(
+                            originalImage,
+                            width: 480,
+                            height: 320,
+                            interpolation: img.Interpolation.linear);
+
+                        final processedData =
+                            img.encodeJpg(resizedImage, quality: 100);
+
+                        final tempDir = await getTemporaryDirectory();
+                        final file = File(
+                            '${tempDir.path}/cropped_${DateTime.now().millisecondsSinceEpoch}.jpg');
+                        await file.writeAsBytes(processedData);
+                        _croppedFilePath = file.path;
+                        await _uploadFile();
+                      }
                     } catch (e) {
                       print("Cropping error: $e");
                       setState(() {
                         _connectionStatus = "Error processing image: $e";
                       });
                     } finally {
-                      setState(() {
-                        _isCropping = false;
-                      });
+                      setState(() => _isCropping = false);
                     }
                   },
                   initialSize: 1,
                   maskColor: Colors.black.withOpacity(0.7),
                   baseColor: Colors.black,
-                  progressIndicator: Text(
-                    "Loading...",
-                    style: TextStyle(color: Colors.white),
-                  ),
+                  progressIndicator:
+                      Text("Loading...", style: TextStyle(color: Colors.white)),
                   cornerDotBuilder: (size, edgeAlignment) =>
                       const SizedBox.shrink(),
                 ),
@@ -209,23 +231,29 @@ class _MyHomePageState extends State<MyHomePage> {
         return;
       }
 
+      setState(() {
+        _connectionStatus = "Picking image...";
+      });
+
       FilePickerResult? result = await FilePicker.platform
           .pickFiles(type: FileType.image, allowMultiple: false);
 
       if (result != null) {
         _selectedFileName = result.files.single.name;
-        _selectedFilePath = result.files.single.path;
 
         // Read image data
         final file = File(result.files.single.path!);
         _imageData = await file.readAsBytes();
 
         // Show crop dialog
+        // ignore: use_build_context_synchronously
         await _showCropDialog(context);
       }
       if (result == null) {
         setState(() {
           _isImageUploading = false;
+          _connectionStatus =
+              _isConnected ? "Connected successfully" : "Disconnected";
         });
       }
     } catch (e) {
@@ -288,20 +316,25 @@ class _MyHomePageState extends State<MyHomePage> {
     try {
       if (_ftpConnect2 != null) {
         await _ftpConnect2?.disconnect();
-        setState(() {
-          _connectionStatus = "Disconnected Successfully";
-          _isConnected = false;
-        });
+        _ftpConnect2 = null;
       }
     } catch (e) {
       setState(() {
         _connectionStatus = "Error $e";
+      });
+    } finally {
+      setState(() {
+        _connectionStatus = "Disconnected Successfully";
+        _isImageUploading = false;
+        disconnectStyles = false;
+        _isConnected = false;
       });
     }
   }
 
   @override
   void dispose() {
+    _focusNode.dispose();
     _hostController.dispose();
     _portController.dispose();
     _usernameController.dispose();
@@ -320,184 +353,189 @@ class _MyHomePageState extends State<MyHomePage> {
         padding: const EdgeInsets.all(16.0),
         child: Form(
           key: _formKey,
-          child: Column(
-            crossAxisAlignment: CrossAxisAlignment.stretch,
-            children: <Widget>[
-              TextFormField(
-                controller: _hostController,
-                decoration: const InputDecoration(
-                  labelText: 'Host',
-                  hintText: 'Enter FTP host',
-                  border: OutlineInputBorder(),
-                ),
-                validator: (value) =>
-                    value?.isEmpty ?? true ? 'Please enter host' : null,
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: _portController,
-                keyboardType: TextInputType.number,
-                decoration: const InputDecoration(
-                  labelText: 'Port',
-                  hintText: 'Enter port (default: 21)',
-                  border: OutlineInputBorder(),
-                ),
-                validator: (value) {
-                  if (value?.isEmpty ?? true) return 'Please enter port';
-                  if (int.tryParse(value!) == null) {
-                    return 'Please enter a valid port number';
-                  }
-                  return null;
-                },
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: _usernameController,
-                decoration: const InputDecoration(
-                  labelText: 'Username',
-                  hintText: 'Enter FTP username',
-                  border: OutlineInputBorder(),
-                ),
-                validator: (value) =>
-                    value?.isEmpty ?? true ? 'Please enter username' : null,
-              ),
-              const SizedBox(height: 16),
-              TextFormField(
-                controller: _passwordController,
-                obscureText: true,
-                decoration: const InputDecoration(
-                  labelText: 'Password',
-                  hintText: 'Enter FTP password',
-                  border: OutlineInputBorder(),
-                ),
-                validator: (value) =>
-                    value?.isEmpty ?? true ? 'Please enter password' : null,
-              ),
-              const SizedBox(height: 16),
-              DropdownButtonFormField<TransferMode>(
-                value: _transferMode,
-                items: const [
-                  DropdownMenuItem(
-                    value: TransferMode.active,
-                    child: Text('Active Mode'),
+          child: GestureDetector(
+            onTap: _clearFocus,
+            child: Column(
+              crossAxisAlignment: CrossAxisAlignment.stretch,
+              children: <Widget>[
+                TextFormField(
+                  controller: _hostController,
+                  decoration: const InputDecoration(
+                    labelText: 'Host',
+                    hintText: 'Enter FTP host',
+                    border: OutlineInputBorder(),
                   ),
-                  DropdownMenuItem(
-                    value: TransferMode.passive,
-                    child: Text('Passive Mode'),
+                  validator: (value) =>
+                      value?.isEmpty ?? true ? 'Please enter host' : null,
+                ),
+                const SizedBox(height: 16),
+                TextFormField(
+                  controller: _portController,
+                  keyboardType: TextInputType.number,
+                  decoration: const InputDecoration(
+                    labelText: 'Port',
+                    hintText: 'Enter port (default: 21)',
+                    border: OutlineInputBorder(),
                   ),
-                ],
-                onChanged: (value) {
-                  setState(() {
-                    _transferMode = value!;
-                  });
-                },
-                decoration: const InputDecoration(
-                  labelText: 'Select Transfer Mode',
-                  border: OutlineInputBorder(),
+                  validator: (value) {
+                    if (value?.isEmpty ?? true) return 'Please enter port';
+                    if (int.tryParse(value!) == null) {
+                      return 'Please enter a valid port number';
+                    }
+                    return null;
+                  },
                 ),
-              ),
-              const SizedBox(height: 24),
-              ElevatedButton(
-                onPressed: _connectToFtp,
-                style: ElevatedButton.styleFrom(
-                  padding: const EdgeInsets.symmetric(vertical: 12),
-                  backgroundColor:
-                      _isConnected ? Colors.green.shade600 : Colors.white,
+                const SizedBox(height: 16),
+                TextFormField(
+                  controller: _usernameController,
+                  decoration: const InputDecoration(
+                    labelText: 'Username',
+                    hintText: 'Enter FTP username',
+                    border: OutlineInputBorder(),
+                  ),
+                  validator: (value) =>
+                      value?.isEmpty ?? true ? 'Please enter username' : null,
                 ),
-                child: Text(
-                  _isConnected ? "Connected" : "Connect to Server",
-                  style: TextStyle(
-                      fontSize: 17,
-                      color: _isConnected ? Colors.white : Colors.black),
+                const SizedBox(height: 16),
+                TextFormField(
+                  controller: _passwordController,
+                  obscureText: true,
+                  decoration: const InputDecoration(
+                    labelText: 'Password',
+                    hintText: 'Enter FTP password',
+                    border: OutlineInputBorder(),
+                  ),
+                  validator: (value) =>
+                      value?.isEmpty ?? true ? 'Please enter password' : null,
                 ),
-              ),
-              const SizedBox(height: 16),
-              ElevatedButton(
-                onPressed: _isImageUploading
-                    ? null
-                    : () async {
-                        setState(() {
-                          _isImageUploading = true;
-                        });
-                        await _pickImage();
-                      },
-                style: ElevatedButton.styleFrom(
-                    padding: const EdgeInsets.symmetric(vertical: 12),
-                    backgroundColor: Colors.white),
-                child: _isImageUploading
-                    ? Row(
-                        mainAxisAlignment: MainAxisAlignment.center,
-                        children: const [
-                          SizedBox(
-                            width: 20,
-                            height: 20,
-                            child: CircularProgressIndicator(
-                              strokeWidth: 2,
-                              valueColor:
-                                  AlwaysStoppedAnimation<Color>(Colors.white),
-                            ),
-                          ),
-                          SizedBox(width: 10),
-                          Text("Processing...",
-                              style:
-                                  TextStyle(fontSize: 17, color: Colors.black)),
-                        ],
-                      )
-                    : const Text("Select File",
-                        style: TextStyle(fontSize: 17, color: Colors.black)),
-              ),
-              const SizedBox(height: 16),
-              ElevatedButton(
-                onPressed: () async {
-                  setState(() {
-                    _connectionStatus = "Disconnecting...";
-                    disconnectStyles = true;
-                    _isConnected = false;
-                  });
-                  await Future.delayed(const Duration(milliseconds: 1000));
-                  await disconnect();
-                  setState(() {
-                    _connectionStatus = "Disconnected Successfully";
-                    _isImageUploading = false;
-                    disconnectStyles = false;
-                  });
-                },
-                style: ElevatedButton.styleFrom(
+                const SizedBox(height: 16),
+                DropdownButtonFormField<TransferMode>(
+                  value: _transferMode,
+                  items: const [
+                    DropdownMenuItem(
+                      value: TransferMode.active,
+                      child: Text('Active Mode'),
+                    ),
+                    DropdownMenuItem(
+                      value: TransferMode.passive,
+                      child: Text('Passive Mode'),
+                    ),
+                  ],
+                  onChanged: (value) {
+                    setState(() {
+                      _transferMode = value!;
+                    });
+                  },
+                  decoration: const InputDecoration(
+                    labelText: 'Select Transfer Mode',
+                    border: OutlineInputBorder(),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                ElevatedButton(
+                  onPressed: () {
+                    _clearFocus();
+                    _connectToFtp();
+                  },
+                  style: ElevatedButton.styleFrom(
                     padding: const EdgeInsets.symmetric(vertical: 12),
                     backgroundColor:
-                        disconnectStyles ? Colors.red.shade800 : Colors.white),
-                child: Text(
-                  disconnectStyles ? "Disconnecting..." : "Disconnect",
-                  style: TextStyle(
-                    color: disconnectStyles ? Colors.white : Colors.black,
-                    fontSize: 17,
+                        _isConnected ? Colors.green.shade600 : Colors.white,
+                  ),
+                  child: Text(
+                    _isConnected ? "Connected" : "Connect to Server",
+                    style: TextStyle(
+                        fontSize: 17,
+                        color: _isConnected ? Colors.white : Colors.black),
                   ),
                 ),
-              ),
-              const SizedBox(height: 24),
-              Card(
-                child: Padding(
-                  padding: const EdgeInsets.all(16.0),
-                  child: Column(
-                    children: [
-                      const Text(
-                        'Connection Status:',
-                        style: TextStyle(
-                          fontSize: 18,
-                          fontWeight: FontWeight.bold,
+                const SizedBox(height: 16),
+                ElevatedButton(
+                  onPressed: _isImageUploading
+                      ? null
+                      : () async {
+                          _clearFocus();
+                          setState(() {
+                            _isImageUploading = true;
+                          });
+                          await _pickImage();
+                        },
+                  style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      backgroundColor: Colors.white),
+                  child: _isImageUploading
+                      ? Row(
+                          mainAxisAlignment: MainAxisAlignment.center,
+                          children: const [
+                            SizedBox(
+                              width: 20,
+                              height: 20,
+                              child: CircularProgressIndicator(
+                                strokeWidth: 2,
+                                valueColor:
+                                    AlwaysStoppedAnimation<Color>(Colors.white),
+                              ),
+                            ),
+                            SizedBox(width: 10),
+                            Text("Processing...",
+                                style: TextStyle(
+                                    fontSize: 17, color: Colors.black)),
+                          ],
+                        )
+                      : const Text("Select File",
+                          style: TextStyle(fontSize: 17, color: Colors.black)),
+                ),
+                const SizedBox(height: 16),
+                ElevatedButton(
+                  onPressed: () async {
+                    _clearFocus();
+                    setState(() {
+                      _connectionStatus = "Disconnecting...";
+                      disconnectStyles = true;
+                      _isConnected = false;
+                    });
+                    await Future.delayed(const Duration(milliseconds: 1000));
+
+                    await disconnect();
+                  },
+                  style: ElevatedButton.styleFrom(
+                      padding: const EdgeInsets.symmetric(vertical: 12),
+                      backgroundColor: disconnectStyles
+                          ? Colors.red.shade800
+                          : Colors.white),
+                  child: Text(
+                    disconnectStyles ? "Disconnecting..." : "Disconnect",
+                    style: TextStyle(
+                      color: disconnectStyles ? Colors.white : Colors.black,
+                      fontSize: 17,
+                    ),
+                  ),
+                ),
+                const SizedBox(height: 24),
+                Card(
+                  child: Padding(
+                    padding: const EdgeInsets.all(16.0),
+                    child: Column(
+                      children: [
+                        const Text(
+                          'Connection Status:',
+                          style: TextStyle(
+                            fontSize: 18,
+                            fontWeight: FontWeight.bold,
+                          ),
                         ),
-                      ),
-                      const SizedBox(height: 8),
-                      Text(
-                        _connectionStatus,
-                        style: Theme.of(context).textTheme.bodyLarge,
-                        textAlign: TextAlign.center,
-                      ),
-                    ],
+                        const SizedBox(height: 8),
+                        Text(
+                          _connectionStatus,
+                          style: Theme.of(context).textTheme.bodyLarge,
+                          textAlign: TextAlign.center,
+                        ),
+                      ],
+                    ),
                   ),
                 ),
-              ),
-            ],
+              ],
+            ),
           ),
         ),
       ),

@@ -43,6 +43,7 @@ dependencies:
   permission_handler: ^11.3.1
   device_info_plus: ^11.1.1
   crop_your_image: ^1.1.0
+  image_cropper: ^8.0.2
 dev_dependencies:
   flutter_test:
     sdk: flutter

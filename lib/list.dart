@@ -1,5 +1,4 @@
-void main() {
-  List<String> list1 = ["a", "b", "c"];
+void mainasd() {
   List<String> list2 = ["d", "e", "f"];
 
   list2.add("aa");
